@@ -1,0 +1,279 @@
+// Inuka Africa — Comprehensive Appraisal System
+// Data model
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  SUPER_ADMIN
+  APPRAISER
+  APPRAISEE
+}
+
+enum CycleStatus {
+  PENDING       // created, not yet opened to raters
+  IN_PROGRESS   // open, awaiting one or more rater submissions
+  AWAITING_SIGNOFF
+  COMPLETED
+  CANCELLED
+}
+
+enum RaterRole {
+  SELF          // appraisee's own self-rating
+  SUPERVISOR
+  SECOND_RATER  // e.g. HQCA
+  THIRD_RATER   // e.g. COO
+  CUSTOM
+}
+
+model User {
+  id            String   @id @default(uuid())
+  email         String   @unique
+  passwordHash  String
+  role          Role
+  fullName      String
+  isActive      Boolean  @default(true)
+  createdAt     DateTime @default(now())
+
+  staffProfile  StaffProfile? @relation("UserStaff")
+
+  ratingsGiven      Rating[]            @relation("RatingsGivenByUser")
+  narrativesAuthored NarrativeResponse[] @relation("NarrativeAuthor")
+  signoffs          SignOff[]           @relation("SignoffByUser")
+  auditLogs         AuditLog[]
+}
+
+model StaffProfile {
+  id                String   @id @default(uuid())
+  staffId           String   @unique   // e.g. IA/1487
+  user              User     @relation("UserStaff", fields: [userId], references: [id])
+  userId            String   @unique
+
+  fullName          String
+  designation       String
+  department        String?
+  region            String?
+  branch            String?
+  reportingTo       String?
+  dateOfJoining     DateTime
+  employmentType    String?  // e.g. Probationary, Confirmed, Contract
+
+  basicPay          Float?
+  allowances        Float?
+
+  jobRoleKey        String   // links to AppraisalTemplate.jobRoleKey
+  cycleFrequencyMonths Int   @default(6) // used to auto-calc next review date
+
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  appraisalCycles   AppraisalCycle[] @relation("AppraiseeCycles")
+  raterAssignments  RaterAssignment[]
+}
+
+// ---------- TEMPLATE DESIGN (Super Admin) ----------
+
+model AppraisalTemplate {
+  id            String   @id @default(uuid())
+  jobRoleKey    String   // e.g. "REGIONAL_CREDIT_ANALYST_PROBATION"
+  title         String   // e.g. "Regional Credit Analyst — Probationary Appraisal"
+  version       Int      @default(1)
+  isActive      Boolean  @default(true)
+  sectionAWeight Float   @default(15) // total points for General Assessment
+  sectionBWeight Float   @default(85) // total points for KPI Assessment
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  competencyGroups CompetencyGroup[]
+  kpiGroups        KpiGroup[]
+  cycles           AppraisalCycle[]
+
+  @@index([jobRoleKey, isActive])
+}
+
+model CompetencyGroup {
+  id            String   @id @default(uuid())
+  template      AppraisalTemplate @relation(fields: [templateId], references: [id], onDelete: Cascade)
+  templateId    String
+  code          String   // e.g. "A1"
+  title         String   // e.g. "Professional Conduct & Work Ethic"
+  orderIndex    Int      @default(0)
+
+  criteria      CompetencyCriterion[]
+}
+
+model CompetencyCriterion {
+  id              String   @id @default(uuid())
+  group           CompetencyGroup @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  groupId         String
+  title           String
+  behaviouralAnchor String
+  orderIndex      Int      @default(0)
+
+  ratings         Rating[]
+}
+
+model KpiGroup {
+  id            String   @id @default(uuid())
+  template      AppraisalTemplate @relation(fields: [templateId], references: [id], onDelete: Cascade)
+  templateId    String
+  code          String   // e.g. "B1"
+  title         String   // e.g. "Portfolio Quality & Risk Management"
+  orderIndex    Int      @default(0)
+
+  kpis          KpiDefinition[]
+}
+
+model KpiDefinition {
+  id              String   @id @default(uuid())
+  group           KpiGroup @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  groupId         String
+  title           String
+  measurementFormula String
+  targetLabel     String   // display text, e.g. "< 10%"
+  weightPct       Float    // e.g. 0.15  (weight as fraction of Section B)
+  higherIsBetter  Boolean  @default(true) // controls achievement% calc direction
+  orderIndex      Int      @default(0)
+
+  actuals         KpiActual[]
+}
+
+// ---------- RATER ASSIGNMENT (flexible per staff/cycle) ----------
+
+model RaterAssignment {
+  id            String   @id @default(uuid())
+  staffProfile  StaffProfile @relation(fields: [staffProfileId], references: [id], onDelete: Cascade)
+  staffProfileId String
+  raterUserId   String
+  raterRole     RaterRole @default(SUPERVISOR)
+  label         String?   // e.g. "HQCA", "COO" — for display
+  createdAt     DateTime @default(now())
+}
+
+// ---------- CYCLE / INSTANCE ----------
+
+model AppraisalCycle {
+  id              String   @id @default(uuid())
+  staffProfile    StaffProfile @relation("AppraiseeCycles", fields: [staffProfileId], references: [id])
+  staffProfileId  String
+  template        AppraisalTemplate @relation(fields: [templateId], references: [id])
+  templateId      String
+
+  assessmentType  String   // "Probationary Review", "Confirmation", "Annual", etc.
+  periodStart     DateTime
+  periodEnd       DateTime
+  dateOfAssessment DateTime?
+  nextReviewDate  DateTime?
+
+  status          CycleStatus @default(PENDING)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  ratings         Rating[]
+  kpiActuals      KpiActual[]
+  narratives      NarrativeResponse[]
+  signoffs        SignOff[]
+  auditLogs       AuditLog[]
+
+  @@index([staffProfileId])
+  @@index([status])
+}
+
+model Rating {
+  id              String   @id @default(uuid())
+  cycle           AppraisalCycle @relation(fields: [cycleId], references: [id], onDelete: Cascade)
+  cycleId         String
+  criterion       CompetencyCriterion @relation(fields: [criterionId], references: [id])
+  criterionId     String
+
+  raterUser       User @relation("RatingsGivenByUser", fields: [raterUserId], references: [id])
+  raterUserId     String
+  raterRole       RaterRole
+
+  score           Int      // 1-5
+  comment         String?
+
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@unique([cycleId, criterionId, raterUserId])
+}
+
+model KpiActual {
+  id            String   @id @default(uuid())
+  cycle         AppraisalCycle @relation(fields: [cycleId], references: [id], onDelete: Cascade)
+  cycleId       String
+  kpi           KpiDefinition @relation(fields: [kpiId], references: [id])
+  kpiId         String
+
+  actualValue   Float?   // raw entered value
+  targetValue   Float?   // numeric target used for achievement calc
+  achievementPct Float?  // computed: capped at 1.0 (100%)
+  weightedScore Float?   // computed: achievementPct * weightPct * sectionBWeight
+
+  enteredByUserId String?
+  updatedAt     DateTime @updatedAt
+
+  @@unique([cycleId, kpiId])
+}
+
+enum NarrativeSection {
+  C1_STRENGTHS
+  C2_IMPROVEMENT_AREAS
+  C3_DEVELOPMENT_PLAN
+  C4_TRAINING_NEEDS
+  C5_CAREER_ASPIRATIONS
+  C6_OUTCOME_RECOMMENDATION
+}
+
+model NarrativeResponse {
+  id            String   @id @default(uuid())
+  cycle         AppraisalCycle @relation(fields: [cycleId], references: [id], onDelete: Cascade)
+  cycleId       String
+  section       NarrativeSection
+  content       String
+
+  author        User @relation("NarrativeAuthor", fields: [authorUserId], references: [id])
+  authorUserId  String
+
+  updatedAt     DateTime @updatedAt
+
+  @@unique([cycleId, section, authorUserId])
+}
+
+enum SignOffParty {
+  APPRAISEE
+  SUPERVISOR
+  HR
+  APPROVING_AUTHORITY
+}
+
+model SignOff {
+  id          String   @id @default(uuid())
+  cycle       AppraisalCycle @relation(fields: [cycleId], references: [id], onDelete: Cascade)
+  cycleId     String
+  party       SignOffParty
+  user        User @relation("SignoffByUser", fields: [userId], references: [id])
+  userId      String
+  signedAt    DateTime @default(now())
+  notes       String?
+
+  @@unique([cycleId, party])
+}
+
+model AuditLog {
+  id          String   @id @default(uuid())
+  cycle       AppraisalCycle? @relation(fields: [cycleId], references: [id])
+  cycleId     String?
+  user        User @relation(fields: [userId], references: [id])
+  userId      String
+  action      String
+  details     String?
+  createdAt   DateTime @default(now())
+}
