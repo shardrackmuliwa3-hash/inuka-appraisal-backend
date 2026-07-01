@@ -58,9 +58,25 @@ router.get('/budgets/:branch', (req, res) => {
   res.json({ branch, disbursement: disb, collection: coll });
 });
 
-// ---- Staff list from budget data ----
-router.get('/staff', (req, res) => {
-  res.json(budgetData.staff);
+// ---- Staff list from budget data + RM info from DB ----
+router.get('/staff', async (req, res) => {
+  try {
+    // Load RM info from database
+    const rmRows = await query('SELECT "staffId","rmName","rmTitle" FROM "BSRMInfo"');
+    const rmMap = {};
+    for (const r of rmRows.rows) rmMap[r.staffId] = { rmName: r.rmName, rmTitle: r.rmTitle };
+
+    // Merge with static budget staff data
+    const staff = budgetData.staff.map(s => ({
+      ...s,
+      rmName: (rmMap[s.staffId] && rmMap[s.staffId].rmName) || null,
+      rmTitle: (rmMap[s.staffId] && rmMap[s.staffId].rmTitle) || null,
+    }));
+    res.json(staff);
+  } catch (err) {
+    // Fallback if BSRMInfo table doesn't exist yet
+    res.json(budgetData.staff);
+  }
 });
 
 // ---- CRUD for BS Appraisal Cycles ----

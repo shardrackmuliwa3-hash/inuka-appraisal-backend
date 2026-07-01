@@ -81,6 +81,9 @@ function parseActualsFromSheet(workbook) {
     if (lower === 'staff id' || lower === 'staffid' || lower.includes('staff id')) colMap['staffId'] = i;
     if (lower.includes('actual name') || lower.includes('name')) colMap['name'] = i;
     if (lower === 'role') colMap['role'] = i;
+    // RM info columns — detect "RM Name", "Regional Manager Name", "RM Title" etc.
+    if ((lower.includes('rm') || lower.includes('regional manager')) && lower.includes('name')) colMap['rmName'] = i;
+    if ((lower.includes('rm') || lower.includes('regional manager')) && (lower.includes('title') || lower.includes('designation'))) colMap['rmTitle'] = i;
   });
 
   // Fallback: use known column positions from the standard Inuka Excel format
@@ -140,6 +143,8 @@ function parseActualsFromSheet(workbook) {
       branch: String(branch).trim(),
       region: row[colMap['region']] ? String(row[colMap['region']]).trim() : '',
       name: row[colMap['name']] ? String(row[colMap['name']]).trim() : '',
+      rmName: colMap['rmName'] !== undefined && row[colMap['rmName']] ? String(row[colMap['rmName']]).trim() : null,
+      rmTitle: colMap['rmTitle'] !== undefined && row[colMap['rmTitle']] ? String(row[colMap['rmTitle']]).trim() : null,
       disbActual,
       collActual,
       monthsFound: Object.keys(disbActual),
@@ -184,11 +189,27 @@ router.post('/actuals', upload.single('file'), async (req, res) => {
           continue;
         }
 
-        // Update each matched cycle
+        // Update each matched cycle with actuals AND rm info
         for (const cycle of cycles) {
+          const rmUpdates = [];
+          const rmParams = [JSON.stringify(row.disbActual), JSON.stringify(row.collActual)];
+          let idx = 3;
+          if (row.rmName) { rmUpdates.push(`"rmName"=$${idx}`); rmParams.push(row.rmName); idx++; }
+          if (row.rmTitle) { rmUpdates.push(`"rmTitle"=$${idx}`); rmParams.push(row.rmTitle); idx++; }
+          rmParams.push(cycle.id);
           await q(
-            `UPDATE "BSAppraisalCycle" SET "disbActual"=$1, "collActual"=$2, "updatedAt"=NOW() WHERE "id"=$3`,
-            [JSON.stringify(row.disbActual), JSON.stringify(row.collActual), cycle.id]
+            `UPDATE "BSAppraisalCycle" SET "disbActual"=$1, "collActual"=$2${rmUpdates.length ? ',' + rmUpdates.join(',') : ''},"updatedAt"=NOW() WHERE "id"=$${idx}`,
+            rmParams
+          );
+        }
+
+        // Upsert RM info lookup table
+        if (row.rmName || row.rmTitle) {
+          await q(
+            `INSERT INTO "BSRMInfo"("id","staffId","branch","rmName","rmTitle","updatedAt")
+             VALUES(gen_random_uuid()::TEXT,$1,$2,$3,$4,NOW())
+             ON CONFLICT("staffId") DO UPDATE SET "rmName"=$3,"rmTitle"=$4,"branch"=$2,"updatedAt"=NOW()`,
+            [row.staffId, row.branch, row.rmName, row.rmTitle]
           );
         }
 
