@@ -1,8 +1,12 @@
 /**
  * BS Excel Upload Route
- * Accepts the BS_Performance_assessment.xlsx file,
- * reads Sheet 3 ("Actual BS Perfromanc"), extracts monthly actuals
- * for disbursement and collection per branch, and updates existing cycles.
+ * Reads BS_Performance_assessment.xlsx Sheet "Actual BS Perfromanc"
+ *
+ * Exact column layout (0-based index from col A=0):
+ *   B(1)=Region, C(2)=Branch, D(3)=StaffID, E(4)=BS Name, F(5)=JoiningDate, G(6)=Role
+ *   H(7)=RM Name, I(8)=RM Title
+ *   Q(16)=Jan-Disb-Actual, R(17)=Feb, S(18)=Mar, T(19)=Apr, U(20)=May, V(21)=Jun
+ *   AT(45)=Jan-Colle-Actual, AU(46)=Feb, AV(47)=Mar, AW(48)=Apr, AX(49)=May, AY(50)=Jun
  */
 
 const express = require('express');
@@ -13,7 +17,6 @@ const { authRequired, requireRole } = require('../middleware/auth');
 const router = express.Router();
 router.use(authRequired, requireRole('SUPER_ADMIN'));
 
-// Store file in memory (no disk writes needed)
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } });
 
 let pool;
@@ -30,180 +33,176 @@ async function q(sql, params = []) {
   finally { client.release(); }
 }
 
-// Month abbreviation map — handles "17.Jun-Disb-Actual" style headers too
-const MONTH_MAP = {
-  'jan': 'Jan', 'feb': 'Feb', 'mar': 'Mar', 'apr': 'Apr',
-  'may': 'May', 'jun': 'Jun', 'jul': 'Jul', 'aug': 'Aug',
-  'sep': 'Sep', 'oct': 'Oct', 'nov': 'Nov', 'dec': 'Dec',
+// Exact column indices (0-based from col A)
+const COLS = {
+  region:    1,   // B
+  branch:    2,   // C
+  staffId:   3,   // D
+  bsName:    4,   // E  "Branch Supervisor Name"
+  role:      6,   // G
+  rmName:    7,   // H  "RM Name"
+  rmTitle:   8,   // I  "RM Title"
+  // Disbursement actuals
+  disbJan:  16,   // Q
+  disbFeb:  17,   // R
+  disbMar:  18,   // S
+  disbApr:  19,   // T
+  disbMay:  20,   // U
+  disbJun:  21,   // V  (17.Jun)
+  // Will auto-detect Jul-Dec if present further right
+  // Collection actuals
+  collJan:  45,   // AT
+  collFeb:  46,   // AU
+  collMar:  47,   // AV
+  collApr:  48,   // AW
+  collMay:  49,   // AX
+  collJun:  50,   // AY
 };
 
-function extractMonth(header) {
-  const lower = header.toLowerCase();
-  for (const [key, val] of Object.entries(MONTH_MAP)) {
-    if (lower.includes(key)) return val;
-  }
-  return null;
+const DISB_MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+const COLL_MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+
+function safeNum(v) {
+  if (v === null || v === undefined || v === '') return null;
+  const n = parseFloat(v);
+  return isNaN(n) ? null : Math.round(n * 100) / 100;
+}
+function safeStr(v) {
+  if (!v) return null;
+  const s = String(v).trim();
+  return s || null;
 }
 
-function parseActualsFromSheet(workbook) {
-  // Find the actuals sheet (Sheet 3)
+function parseSheet(workbook) {
+  // Find the actuals sheet
   const sheetName = workbook.SheetNames.find(n =>
     n.toLowerCase().includes('actual') || n.toLowerCase().includes('performance')
   ) || workbook.SheetNames[2];
-
-  if (!sheetName) throw new Error('Could not find the Actual Performance sheet in this workbook.');
+  if (!sheetName) throw new Error('Cannot find the Actual Performance sheet.');
 
   const ws = workbook.Sheets[sheetName];
   const rows = XLSX.utils.sheet_to_json(ws, { header: 1, defval: null });
+  if (rows.length < 2) throw new Error('Sheet is empty.');
 
-  if (rows.length < 2) throw new Error('Sheet appears to be empty.');
+  // Detect Jul-Dec disbursement and collection columns from headers
+  const headers = (rows[0] || []).map(h => h ? String(h).trim().toLowerCase() : '');
+  const extraDisbCols = {}; // month -> col index for Jul-Dec
+  const extraCollCols = {};
 
-  // Row 0 = headers
-  const headers = rows[0].map(h => h ? String(h).trim() : '');
-
-  // Find column indices by header content
-  const colMap = {};
   headers.forEach((h, i) => {
-    const lower = h.toLowerCase();
-    // Disbursement actuals
-    if ((lower.includes('disb') || lower.includes('disbursement')) && lower.includes('actual')) {
-      const month = extractMonth(h);
-      if (month) colMap[`disb_${month}`] = i;
+    if (i <= 21) return; // skip already-known columns
+    const isDisb = h.includes('disb') && h.includes('actual');
+    const isColl = (h.includes('colle') || h.includes('collection')) && h.includes('actual') && !h.includes('rate') && !h.includes('%');
+    const monthMatch = h.match(/jul|aug|sep|oct|nov|dec/);
+    if (monthMatch) {
+      const m = monthMatch[0].charAt(0).toUpperCase() + monthMatch[0].slice(1);
+      if (isDisb) extraDisbCols[m] = i;
+      if (isColl) extraCollCols[m] = i;
     }
-    // Collection actuals
-    if ((lower.includes('colle') || lower.includes('collection')) && lower.includes('actual') && !lower.includes('rate') && !lower.includes('%')) {
-      const month = extractMonth(h);
-      if (month) colMap[`coll_${month}`] = i;
-    }
-    // Identity columns
-    if (lower === 'branch' || lower.includes('branch')) colMap['branch'] = i;
-    if (lower === 'region' || lower.includes('region')) colMap['region'] = i;
-    if (lower === 'staff id' || lower === 'staffid' || lower.includes('staff id')) colMap['staffId'] = i;
-    if (lower.includes('actual name') || lower.includes('name')) colMap['name'] = i;
-    if (lower === 'role') colMap['role'] = i;
-    // RM info columns — detect "RM Name", "Regional Manager Name", "RM Title" etc.
-    if ((lower.includes('rm') || lower.includes('regional manager')) && lower.includes('name')) colMap['rmName'] = i;
-    if ((lower.includes('rm') || lower.includes('regional manager')) && (lower.includes('title') || lower.includes('designation'))) colMap['rmTitle'] = i;
   });
-
-  // Fallback: use known column positions from the standard Inuka Excel format
-  // B=region(1), C=branch(2), D=staffId(3), E=name(4), G=role(6)
-  // O=Jan-Disb(14), P=Feb-Disb(15), Q=Mar-Disb(16), R=Apr-Disb(17), S=May-Disb(18), T=Jun-Disb(19)
-  // AR=Jan-Coll(43), AS=Feb-Coll(44), AT=Mar-Coll(45), AU=Apr-Coll(46), AV=May-Coll(47), AW=Jun-Coll(48)
-  // Also Jul-Dec: U=Jul-Disb, V=Aug... etc (need to check exact layout for full-year)
-
-  if (!colMap['branch']) colMap['branch'] = 2;
-  if (!colMap['region']) colMap['region'] = 1;
-  if (!colMap['staffId']) colMap['staffId'] = 3;
-  if (!colMap['name']) colMap['name'] = 4;
-
-  // Standard Inuka actuals columns (H1 period = Jan–Jun)
-  const STD_DISB = { Jan:14, Feb:15, Mar:16, Apr:17, May:18, Jun:19, Jul:20, Aug:21, Sep:22, Oct:23, Nov:24, Dec:25 };
-  const STD_COLL = { Jan:43, Feb:44, Mar:45, Apr:46, May:47, Jun:48, Jul:49, Aug:50, Sep:51, Oct:52, Nov:53, Dec:54 };
-
-  for (const [m, idx] of Object.entries(STD_DISB)) {
-    if (!colMap[`disb_${m}`]) colMap[`disb_${m}`] = idx;
-  }
-  for (const [m, idx] of Object.entries(STD_COLL)) {
-    if (!colMap[`coll_${m}`]) colMap[`coll_${m}`] = idx;
-  }
 
   const results = [];
 
   for (let r = 1; r < rows.length; r++) {
     const row = rows[r];
-    if (!row || row.every(c => c === null || c === undefined || c === '')) continue;
+    if (!row) continue;
 
-    const staffId = row[colMap['staffId']];
-    const branch = row[colMap['branch']];
-    if (!staffId || staffId === '-' || !branch) continue;
+    const staffIdRaw = row[COLS.staffId];
+    const branch = safeStr(row[COLS.branch]);
+    if (!staffIdRaw || staffIdRaw === '-' || !branch) continue;
+    const staffId = String(staffIdRaw).trim();
+    if (!staffId || isNaN(parseInt(staffId))) continue;
 
-    // Try to parse staffId as integer
-    const staffIdStr = String(staffId).trim();
-    if (!staffIdStr || isNaN(parseInt(staffIdStr))) continue;
-
+    // Build disbursement actuals
     const disbActual = {};
-    const collActual = {};
+    const baseDisb = [
+      ['Jan', COLS.disbJan], ['Feb', COLS.disbFeb], ['Mar', COLS.disbMar],
+      ['Apr', COLS.disbApr], ['May', COLS.disbMay], ['Jun', COLS.disbJun],
+    ];
+    for (const [m, idx] of baseDisb) {
+      const v = safeNum(row[idx]);
+      if (v !== null) disbActual[m] = v;
+    }
+    for (const [m, idx] of Object.entries(extraDisbCols)) {
+      const v = safeNum(row[idx]);
+      if (v !== null) disbActual[m] = v;
+    }
 
-    for (const m of ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec']) {
-      const dIdx = colMap[`disb_${m}`];
-      const cIdx = colMap[`coll_${m}`];
-      if (dIdx !== undefined && row[dIdx] !== null && row[dIdx] !== undefined && row[dIdx] !== '') {
-        const v = parseFloat(row[dIdx]);
-        if (!isNaN(v)) disbActual[m] = Math.round(v * 100) / 100;
-      }
-      if (cIdx !== undefined && row[cIdx] !== null && row[cIdx] !== undefined && row[cIdx] !== '') {
-        const v = parseFloat(row[cIdx]);
-        if (!isNaN(v)) collActual[m] = Math.round(v * 100) / 100;
-      }
+    // Build collection actuals
+    const collActual = {};
+    const baseColl = [
+      ['Jan', COLS.collJan], ['Feb', COLS.collFeb], ['Mar', COLS.collMar],
+      ['Apr', COLS.collApr], ['May', COLS.collMay], ['Jun', COLS.collJun],
+    ];
+    for (const [m, idx] of baseColl) {
+      const v = safeNum(row[idx]);
+      if (v !== null) collActual[m] = v;
+    }
+    for (const [m, idx] of Object.entries(extraCollCols)) {
+      const v = safeNum(row[idx]);
+      if (v !== null) collActual[m] = v;
     }
 
     results.push({
-      staffId: staffIdStr,
-      branch: String(branch).trim(),
-      region: row[colMap['region']] ? String(row[colMap['region']]).trim() : '',
-      name: row[colMap['name']] ? String(row[colMap['name']]).trim() : '',
-      rmName: colMap['rmName'] !== undefined && row[colMap['rmName']] ? String(row[colMap['rmName']]).trim() : null,
-      rmTitle: colMap['rmTitle'] !== undefined && row[colMap['rmTitle']] ? String(row[colMap['rmTitle']]).trim() : null,
+      staffId,
+      branch,
+      region: safeStr(row[COLS.region]) || '',
+      name: safeStr(row[COLS.bsName]) || '',
+      role: safeStr(row[COLS.role]) || 'Branch Supervisor',
+      rmName: safeStr(row[COLS.rmName]),
+      rmTitle: safeStr(row[COLS.rmTitle]),
       disbActual,
       collActual,
-      monthsFound: Object.keys(disbActual),
+      disbMonths: Object.keys(disbActual).length,
+      collMonths: Object.keys(collActual).length,
     });
   }
 
   return results;
 }
 
-// POST /api/bs-upload/actuals — upload Excel, extract actuals, update cycles
+// POST /api/bs-upload/actuals
 router.post('/actuals', upload.single('file'), async (req, res) => {
   try {
-    if (!req.file) return res.status(400).json({ error: 'No file uploaded. Please attach the Excel file.' });
-
-    const ext = req.file.originalname.toLowerCase();
-    if (!ext.endsWith('.xlsx') && !ext.endsWith('.xls')) {
+    if (!req.file) return res.status(400).json({ error: 'No file uploaded.' });
+    if (!req.file.originalname.toLowerCase().match(/\.xlsx?$/)) {
       return res.status(400).json({ error: 'Please upload an Excel file (.xlsx or .xls).' });
     }
 
-    // Parse Excel from buffer
     const workbook = XLSX.read(req.file.buffer, { type: 'buffer', cellDates: true });
-    const parsed = parseActualsFromSheet(workbook);
-
-    if (!parsed.length) {
-      return res.status(400).json({ error: 'No valid staff data found in the Excel file. Please check the format.' });
-    }
+    const parsed = parseSheet(workbook);
+    if (!parsed.length) return res.status(400).json({ error: 'No valid staff rows found. Check the file format.' });
 
     const summary = { matched: [], notFound: [], errors: [] };
 
     for (const row of parsed) {
       try {
-        // Try to find an existing cycle for this branch/staffId
+        // Match by staffId OR branch name
         const cycles = await q(
-          `SELECT id, "staffName", "branch", "reviewPeriod", "year", "status" FROM "BSAppraisalCycle"
-           WHERE ("staffId" = $1 OR "branch" ILIKE $2) AND "status" NOT IN ('CANCELLED')
-           ORDER BY "createdAt" DESC LIMIT 5`,
+          `SELECT id,"staffName","branch","reviewPeriod","year","status"
+           FROM "BSAppraisalCycle"
+           WHERE ("staffId"=$1 OR "branch" ILIKE $2) AND "status" NOT IN ('CANCELLED')
+           ORDER BY "createdAt" DESC LIMIT 10`,
           [row.staffId, row.branch]
         );
 
         if (!cycles.length) {
-          summary.notFound.push({ staffId: row.staffId, branch: row.branch, name: row.name, reason: 'No active appraisal cycle found' });
+          summary.notFound.push({ staffId: row.staffId, branch: row.branch, name: row.name, rmName: row.rmName });
           continue;
         }
 
-        // Update each matched cycle with actuals AND rm info
         for (const cycle of cycles) {
-          const rmUpdates = [];
-          const rmParams = [JSON.stringify(row.disbActual), JSON.stringify(row.collActual)];
+          const params = [JSON.stringify(row.disbActual), JSON.stringify(row.collActual)];
+          let sql = `UPDATE "BSAppraisalCycle" SET "disbActual"=$1,"collActual"=$2`;
           let idx = 3;
-          if (row.rmName) { rmUpdates.push(`"rmName"=$${idx}`); rmParams.push(row.rmName); idx++; }
-          if (row.rmTitle) { rmUpdates.push(`"rmTitle"=$${idx}`); rmParams.push(row.rmTitle); idx++; }
-          rmParams.push(cycle.id);
-          await q(
-            `UPDATE "BSAppraisalCycle" SET "disbActual"=$1, "collActual"=$2${rmUpdates.length ? ',' + rmUpdates.join(',') : ''},"updatedAt"=NOW() WHERE "id"=$${idx}`,
-            rmParams
-          );
+          if (row.rmName) { sql += `,"rmName"=$${idx}`; params.push(row.rmName); idx++; }
+          if (row.rmTitle) { sql += `,"rmTitle"=$${idx}`; params.push(row.rmTitle); idx++; }
+          sql += `,"updatedAt"=NOW() WHERE "id"=$${idx}`;
+          params.push(cycle.id);
+          await q(sql, params);
         }
 
-        // Upsert RM info lookup table
+        // Upsert RM info
         if (row.rmName || row.rmTitle) {
           await q(
             `INSERT INTO "BSRMInfo"("id","staffId","branch","rmName","rmTitle","updatedAt")
@@ -217,10 +216,10 @@ router.post('/actuals', upload.single('file'), async (req, res) => {
           staffId: row.staffId,
           branch: row.branch,
           name: row.name,
+          rmName: row.rmName,
           cyclesUpdated: cycles.length,
-          monthsLoaded: row.monthsFound,
-          disbMonths: Object.keys(row.disbActual).length,
-          collMonths: Object.keys(row.collActual).length,
+          disbMonths: row.disbMonths,
+          collMonths: row.collMonths,
         });
       } catch (err) {
         summary.errors.push({ staffId: row.staffId, branch: row.branch, error: err.message });
@@ -241,16 +240,14 @@ router.post('/actuals', upload.single('file'), async (req, res) => {
   }
 });
 
-// GET /api/bs-upload/preview — parse Excel and preview without saving
+// POST /api/bs-upload/preview — parse without saving
 router.post('/preview', upload.single('file'), async (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ error: 'No file uploaded.' });
     const workbook = XLSX.read(req.file.buffer, { type: 'buffer', cellDates: true });
-    const parsed = parseActualsFromSheet(workbook);
-    res.json({ totalRows: parsed.length, rows: parsed.slice(0, 5), sheetNames: workbook.SheetNames });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
+    const parsed = parseSheet(workbook);
+    res.json({ totalRows: parsed.length, sample: parsed.slice(0, 3), sheetNames: workbook.SheetNames });
+  } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 module.exports = router;
