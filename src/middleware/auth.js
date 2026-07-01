@@ -1,11 +1,13 @@
 const jwt = require("jsonwebtoken");
 
 function authRequired(req, res, next) {
+  // Accept token from Authorization header OR ?token= query param (for browser-direct links)
   const header = req.headers.authorization;
-  if (!header || !header.startsWith("Bearer ")) {
+  const queryToken = req.query.token;
+  const token = queryToken || (header && header.startsWith("Bearer ") ? header.split(" ")[1] : null);
+  if (!token) {
     return res.status(401).json({ error: "Missing or invalid Authorization header" });
   }
-  const token = header.split(" ")[1];
   try {
     const payload = jwt.verify(token, process.env.JWT_SECRET);
     req.user = payload; // { id, email, role, staffProfileId }
