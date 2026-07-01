@@ -8,6 +8,7 @@ const adminRoutes = require("./routes/admin.routes");
 const templateRoutes = require("./routes/template.routes");
 const cycleRoutes = require("./routes/cycle.routes");
 const reportRoutes = require("./routes/report.routes");
+const passwordRoutes = require("./routes/password.routes");
 
 const app = express();
 
@@ -22,6 +23,7 @@ app.use("/api/admin", adminRoutes);
 app.use("/api/templates", templateRoutes);
 app.use("/api/cycles", cycleRoutes);
 app.use("/api/reports", reportRoutes);
+app.use("/api/users", passwordRoutes);
 
 app.use((req, res) => res.status(404).json({ error: "Not found" }));
 
