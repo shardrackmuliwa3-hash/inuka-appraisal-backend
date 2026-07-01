@@ -24,6 +24,7 @@ app.use("/api/templates", templateRoutes);
 app.use("/api/cycles", cycleRoutes);
 app.use("/api/reports", reportRoutes);
 app.use("/api/users", passwordRoutes);
+app.use("/api/bs-appraisals", require("./routes/bs-appraisal.routes"));
 
 app.use((req, res) => res.status(404).json({ error: "Not found" }));
 
