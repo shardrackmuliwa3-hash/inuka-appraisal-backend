@@ -33,7 +33,25 @@ router.get("/users", async (req, res) => {
   res.json(users);
 });
 
-router.patch("/users/:id", async (req, res) => {
+router.delete("/users/:id", async (req, res) => {
+  try {
+    // Prevent deleting yourself
+    if (req.params.id === req.user.id) {
+      return res.status(400).json({ error: "You cannot delete your own account." });
+    }
+    await prisma.user.delete({ where: { id: req.params.id } });
+    res.status(204).end();
+  } catch (err) {
+    if (err.code === "P2003") {
+      // Has related records — soft delete instead
+      await prisma.user.update({ where: { id: req.params.id }, data: { isActive: false } });
+      return res.json({ deactivated: true, message: "User has appraisal records — deactivated instead of deleted." });
+    }
+    console.error(err);
+    res.status(500).json({ error: "Failed to delete user" });
+  }
+});
+
   const { isActive, fullName, role } = req.body;
   const user = await prisma.user.update({
     where: { id: req.params.id },
