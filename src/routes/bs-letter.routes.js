@@ -21,6 +21,17 @@ async function q(sql, params = []) {
 }
 async function q1(sql, params = []) { const rows = await q(sql, params); return rows[0] || null; }
 
+function safeJson(val) {
+  if (!val) return {};
+  if (typeof val === 'object') return val;
+  try { return JSON.parse(val); } catch { return {}; }
+}
+
+function normalizeCycle(cycle) {
+  if (!cycle) return null;
+  return { ...cycle, disbBudget: safeJson(cycle.disbBudget), disbActual: safeJson(cycle.disbActual), collBudget: safeJson(cycle.collBudget), collActual: safeJson(cycle.collActual) };
+}
+
 // Log every significant action
 async function auditLog(issuedLetterId, cycleId, user, action, details) {
   try {
@@ -153,7 +164,7 @@ router.post('/cycles/:cycleId/issue', requireRole('SUPER_ADMIN', 'APPRAISER'), a
   try {
     const { templateId, refNumber } = req.body;
 
-    const cycle = await q1(`SELECT * FROM "BSAppraisalCycle" WHERE id=$1`, [req.params.cycleId]);
+    const _rawCycle = await q1(`SELECT * FROM "BSAppraisalCycle" WHERE id=$1`, [req.params.cycleId]);
     if (!cycle) return res.status(404).json({ error: 'Cycle not found' });
 
     const tmpl = await q1(`SELECT * FROM "BSLetterTemplate" WHERE id=$1`, [templateId]);
@@ -191,7 +202,7 @@ router.get('/cycles/:cycleId/letters', async (req, res) => {
 router.get('/letters/:id', async (req, res) => {
   const letter = await q1(`SELECT * FROM "BSIssuedLetter" WHERE id=$1`, [req.params.id]);
   if (!letter) return res.status(404).json({ error: 'Letter not found' });
-  const cycle = await q1(`SELECT * FROM "BSAppraisalCycle" WHERE id=$1`, [letter.cycleId]);
+  const _rawCycle = await q1(`SELECT * FROM "BSAppraisalCycle" WHERE id=$1`, [letter.cycleId]);
   await auditLog(letter.id, letter.cycleId, req.user, 'LETTER_VIEWED', null);
   res.json({ ...letter, cycle });
 });
@@ -244,7 +255,7 @@ router.get('/letters/:id/html', async (req, res) => {
   try {
     const letter = await q1(`SELECT * FROM "BSIssuedLetter" WHERE id=$1`, [req.params.id]);
     if (!letter) return res.status(404).json({ error: 'Letter not found' });
-    const cycle = await q1(`SELECT * FROM "BSAppraisalCycle" WHERE id=$1`, [letter.cycleId]);
+    const _rawCycle = await q1(`SELECT * FROM "BSAppraisalCycle" WHERE id=$1`, [letter.cycleId]);
     const score = computeBSCycleScore(cycle);
 
     // Build the rendered letter HTML

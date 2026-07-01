@@ -27,6 +27,24 @@ async function query(sql, params) {
   }
 }
 
+// Safely parse JSONB fields that may come back as strings or objects
+function safeJson(val) {
+  if (!val) return {};
+  if (typeof val === 'object') return val;
+  try { return JSON.parse(val); } catch { return {}; }
+}
+
+function normalizeCycle(cycle) {
+  if (!cycle) return null;
+  return {
+    ...cycle,
+    disbBudget: safeJson(cycle.disbBudget),
+    disbActual: safeJson(cycle.disbActual),
+    collBudget: safeJson(cycle.collBudget),
+    collActual: safeJson(cycle.collActual),
+  };
+}
+
 // ---- Budget data endpoint (used by frontend to pre-fill forms) ----
 router.get('/budgets', (req, res) => {
   res.json({ branches: Object.keys(budgetData.disbursement), ...budgetData });
@@ -102,7 +120,7 @@ router.get('/:id', async (req, res) => {
   try {
     const result = await query('SELECT * FROM "BSAppraisalCycle" WHERE "id" = $1', [req.params.id]);
     if (!result.rows.length) return res.status(404).json({ error: 'Cycle not found' });
-    const cycle = result.rows[0];
+    const cycle = normalizeCycle(result.rows[0]);
     const computedScore = computeBSCycleScore(cycle);
     res.json({ ...cycle, computedScore });
   } catch (err) {
