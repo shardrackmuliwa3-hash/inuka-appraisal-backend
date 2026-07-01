@@ -52,6 +52,7 @@ router.delete("/users/:id", async (req, res) => {
   }
 });
 
+router.patch("/users/:id", async (req, res) => {
   const { isActive, fullName, role } = req.body;
   const user = await prisma.user.update({
     where: { id: req.params.id },
