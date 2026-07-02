@@ -52,7 +52,7 @@ router.post('/admin/bulk-create', authRequired, requireRole('SUPER_ADMIN'), asyn
         continue;
       }
       const user = await q1(
-        `INSERT INTO "User"("id","email","password","fullName","role","createdAt","updatedAt")
+        `INSERT INTO "User"("id","email","passwordHash","fullName","role","createdAt","updatedAt")
          VALUES(gen_random_uuid()::TEXT,$1,$2,$3,'BRANCH_SUPERVISOR',NOW(),NOW()) RETURNING id`,
         [email, defaultPassword, staff.name]
       );
@@ -74,7 +74,7 @@ router.post('/admin/bulk-create', authRequired, requireRole('SUPER_ADMIN'), asyn
         continue;
       }
       const user = await q1(
-        `INSERT INTO "User"("id","email","password","fullName","role","createdAt","updatedAt")
+        `INSERT INTO "User"("id","email","passwordHash","fullName","role","createdAt","updatedAt")
          VALUES(gen_random_uuid()::TEXT,$1,$2,$3,'REGIONAL_MANAGER',NOW(),NOW()) RETURNING id`,
         [email, defaultPassword, rm.rmName]
       );
@@ -150,3 +150,16 @@ router.get('/rm/my-region', authRequired, requireRole('REGIONAL_MANAGER', 'SUPER
 });
 
 module.exports = router;
+
+// One-time fix: copy password → passwordHash for accounts created with wrong field
+router.post('/admin/fix-passwords', authRequired, requireRole('SUPER_ADMIN'), async (req, res) => {
+  try {
+    const result = await q(
+      `UPDATE "User" SET "passwordHash"="password"
+       WHERE role IN ('BRANCH_SUPERVISOR','REGIONAL_MANAGER')
+       AND ("passwordHash" IS NULL OR "passwordHash"='')
+       AND "password" IS NOT NULL AND "password"!=''`
+    );
+    res.json({ message: 'Password fields fixed.', rowsUpdated: result.length });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
